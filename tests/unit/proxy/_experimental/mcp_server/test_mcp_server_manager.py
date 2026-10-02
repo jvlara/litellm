@@ -15580,3 +15580,76 @@ class TestToolCatalogGuard:
             proxy_logging_obj=proxy_logging_obj,
             server=server,
         )
+
+
+def _approval_policy_for_builder_tests():
+    from litellm.types.mcp_server.mcp_server_manager import MCPApprovalPolicy
+
+    return MCPApprovalPolicy(
+        tools=("delete_records",),
+        issuer="https://approvals.example.com",
+        jwks_url="https://approvals.example.com/.well-known/jwks.json",
+    )
+
+
+@pytest.mark.asyncio
+async def test_unfiltered_list_table_carries_approval_policy():
+    manager = MCPServerManager()
+    policy = _approval_policy_for_builder_tests()
+    server = MCPServer(
+        server_id="approval-list-server",
+        name="records",
+        server_name="records_mcp",
+        url="https://example.com/mcp",
+        transport=MCPTransport.http,
+        approval_policy=policy,
+    )
+
+    assert manager._build_mcp_server_table(server).approval_policy == policy
+
+    manager.registry[server.server_id] = server
+    try:
+        listed = await manager.get_all_mcp_servers_unfiltered()
+    finally:
+        manager.registry.pop(server.server_id, None)
+    assert listed[0].approval_policy == policy
+
+
+@pytest.mark.asyncio
+async def test_health_check_table_carries_approval_policy():
+    policy = _approval_policy_for_builder_tests()
+    manager = MCPServerManager()
+    server = MCPServer(
+        server_id="approval-health-server",
+        name="records",
+        url="https://example.com/mcp",
+        transport=MCPTransport.http,
+        auth_type=MCPAuth.oauth2,
+        approval_policy=policy,
+    )
+    manager.registry[server.server_id] = server
+    try:
+        with patch(
+            "litellm.proxy._experimental.mcp_server.mcp_server_manager._mcp_server_reachability",
+            AsyncMock(return_value=("healthy", None)),
+        ):
+            table = await manager.health_check_server(server.server_id)
+    finally:
+        manager.registry.pop(server.server_id, None)
+    assert table.approval_policy == policy
+
+
+def test_temporary_mcp_server_record_carries_approval_policy():
+    from litellm.proxy._types import NewMCPServerRequest
+    from litellm.proxy.management_endpoints.mcp_management_endpoints import _build_temporary_mcp_server_record
+
+    policy = _approval_policy_for_builder_tests()
+    payload = NewMCPServerRequest(
+        server_name="records_mcp",
+        url="https://example.com/mcp",
+        transport="http",
+        approval_policy=policy,
+    )
+
+    table = _build_temporary_mcp_server_record(payload, "admin", "temp-id")
+    assert table.approval_policy == policy
